@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Sub2API armor-break — 免编译一键部署（下载预编译产物）
-# 用法: curl -sSL <URL> | sudo bash
+# Sub2API armor-break — 免编译一键部署
+#
+#   下载预编译产物，目标机只解包 + 起两个容器，不做任何编译。
+#   用法：
+#     curl -sSL https://raw.githubusercontent.com/firstwxx1/sub2api-armor-break/main/quickstart/install-precompiled.sh | sudo bash
 # =============================================================================
 set -euo pipefail
 
@@ -10,43 +13,64 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-OWNER="firstwxx1"
-REPO="sub2api-armor-break"
 TAG="v0.2.9-armor1"
 ASSET="sub2api-armor-local.tar.gz"
+SHA256="ed4002216aa84de9b61af81bccb0c2bf83f600948d9ff514ae52c30532779ae1"
+GH="https://github.com/firstwxx1/sub2api-armor-break/releases/download/${TAG}/${ASSET}"
 
-# GitHub 直连，失败自动降级到两个国内可用代理
-URLS=(
-  "https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${ASSET}"
-  "https://ghfast.top/https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${ASSET}"
-  "https://gh-proxy.com/https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${ASSET}"
+# 按实测速度排序：gh-proxy.com 最快，直连最慢
+SOURCES=(
+  "https://gh-proxy.com/${GH}"
+  "https://ghfast.top/${GH}"
+  "${GH}"
 )
 
 WORK_DIR="/tmp/sub2api-precompiled"
 mkdir -p "$WORK_DIR"
+cd "$WORK_DIR"
+rm -f "$ASSET"
 
-echo "[*] 开始下载预编译包 (${ASSET}) ..."
-SUCCESS=0
-for url in "${URLS[@]}"; do
-  echo "[*] 尝试源: $url"
-  if curl -L --connect-timeout 10 --max-time 600 -o "$WORK_DIR/$ASSET" "$url"; then
-    if [ -s "$WORK_DIR/$ASSET" ]; then
-      SUCCESS=1
-      break
-    fi
+echo "======================================================="
+echo " Sub2API armor-break 免编译部署 (${TAG})"
+echo " 目标机不会编译任何代码"
+echo "======================================================="
+
+echo "[*] 下载 ${ASSET} (38 MB) ..."
+OK=0
+for url in "${SOURCES[@]}"; do
+  host=$(echo "$url" | awk -F/ '{print $3}')
+  echo "[*] 尝试: $host"
+  if curl -fL --connect-timeout 10 --retry 2 --retry-delay 2 \
+       --speed-time 20 --speed-limit 4096 \
+       -o "${ASSET}.part" "$url"; then
+    mv -f "${ASSET}.part" "$ASSET"
+    OK=1
+    break
   fi
-  echo "[!] 该源失败，换下一个..."
-  rm -f "$WORK_DIR/$ASSET"
+  echo "[!] $host 失败或速度过慢，切换下一个源"
+  rm -f "${ASSET}.part"
 done
 
-if [ "$SUCCESS" -ne 1 ]; then
-  echo "[!] 所有下载源均失败。" >&2
-  echo "    请手动下载 ${ASSET} 并放到 ${WORK_DIR}/" >&2
+if [ "$OK" -ne 1 ]; then
+  echo "[错误] 所有下载源均失败。" >&2
+  echo "       请手动下载 ${ASSET} 后放到 ${WORK_DIR}/ 再重跑本脚本。" >&2
   exit 1
 fi
 
-echo "[*] 解压中..."
-tar -xzf "$WORK_DIR/$ASSET" -C "$WORK_DIR"
+echo "[*] 校验 SHA256 ..."
+ACTUAL=$(sha256sum "$ASSET" | awk '{print $1}')
+if [ "$ACTUAL" != "$SHA256" ]; then
+  echo "[错误] 校验失败，产物可能不完整或被篡改。" >&2
+  echo "       期望: $SHA256" >&2
+  echo "       实际: $ACTUAL" >&2
+  rm -f "$ASSET"
+  exit 1
+fi
+echo "[成功] SHA256 校验通过"
 
-echo "[*] 开始免编译部署..."
-bash "$WORK_DIR/deploy/setup.sh"
+echo "[*] 解压 ..."
+rm -rf "$WORK_DIR/deploy"
+tar -xzf "$ASSET"
+
+echo "[*] 执行免编译部署 ..."
+exec bash "$WORK_DIR/deploy/setup.sh"

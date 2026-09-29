@@ -4,6 +4,14 @@
 
 ## 一行安装（全新服务器）
 
+预编译二进制部署（推荐，目标机不编译，1 GB 内存也能跑）：
+
+```bash
+curl -sSL https://raw.githubusercontent.com/firstwxx1/sub2api-armor-break/main/quickstart/install-precompiled.sh | sudo bash
+```
+
+从源码构建部署（内存建议 ≥ 2 GB，构建期峰值可能超过 1 GB）：
+
 ```bash
 curl -sSL https://raw.githubusercontent.com/firstwxx1/sub2api-armor-break/main/quickstart/install.sh | sudo bash
 ```
