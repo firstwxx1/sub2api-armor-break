@@ -311,7 +311,8 @@ cmd_uninstall() {
       compose down -v || true
       p_ok "数据卷已删除"
     fi
-    if is_tty && ask_yn "是否删除应用目录 $PRECOMPILED_DIR（含 app.env 与人格库）？"; then
+    if [ -n "$PRECOMPILED_DIR" ] && [ "$PRECOMPILED_DIR" != "/" ] \
+       && is_tty && ask_yn "是否删除应用目录 $PRECOMPILED_DIR（含 app.env 与人格库）？"; then
       $SUDO rm -rf "$PRECOMPILED_DIR"
       p_ok "应用目录已删除"
     fi
@@ -396,7 +397,7 @@ cmd_logs() {
   resolve_compose_dir; [ -n "$COMPOSE_DIR" ] || { p_err "尚未安装"; exit 1; }
   if [ "$INSTALL_MODE" = "precompiled" ]; then
     # 预编译模式应用跑在宿主机 systemd 上，日志在 journald
-    journalctl -u sub2api -f -n 200
+    $SUDO journalctl -u sub2api -f -n 200
   else
     compose logs -f --tail=200 sub2api
   fi
