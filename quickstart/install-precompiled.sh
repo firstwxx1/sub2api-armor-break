@@ -72,5 +72,17 @@ echo "[*] 解压 ..."
 rm -rf "$WORK_DIR/deploy"
 tar -xzf "$ASSET"
 
+# 旧的源码构建安装会留下 /app/data，导致二进制误判“已安装”并跳过 AUTO_SETUP
+if [ -e /app/data/config.yaml ] || [ -e /app/data/.installed ]; then
+  if [ ! -f /opt/sub2api/app.env ]; then
+    BAK="/app/data.bak.$(date +%Y%m%d%H%M%S)"
+    echo "[!] 检测到旧版源码安装残留 /app/data，且没有对应的 /opt/sub2api/app.env"
+    echo "[*] 为保证本次能重新初始化，先把残留移到 $BAK（不删除）"
+    mv /app/data "$BAK"
+  else
+    echo "[!] 已有 /opt/sub2api/app.env，保留 /app/data 不处理"
+  fi
+fi
+
 echo "[*] 执行免编译部署 ..."
 exec bash "$WORK_DIR/deploy/setup.sh"
