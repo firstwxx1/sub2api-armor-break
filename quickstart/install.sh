@@ -10,8 +10,13 @@ set -euo pipefail
 
 # ---------- 常量 ----------
 REPO_URL="https://github.com/firstwxx1/sub2api-armor-break.git"
+REPO_SLUG="firstwxx1/sub2api-armor-break"
 REPO_BRANCH="main"
 CLONE_BASE="/opt/sub2api-armor-break"
+PRECOMPILED_DIR="/opt/sub2api"
+PRECOMPILED_SCRIPT_URL="https://raw.githubusercontent.com/${REPO_SLUG}/${REPO_BRANCH}/quickstart/install-precompiled.sh"
+# 下载加速源，按实测速度排序；最后一项空串 = 直连 github.com
+GH_PROXIES=("https://gh-proxy.com/" "https://ghfast.top/" "")
 COMPLIANCE_PHRASE_ZH="我已阅读、理解并同意 Sub2API 部署与运营合规承诺"
 
 # ---------- 颜色 ----------
@@ -37,25 +42,56 @@ fi
 # 定位 compose 目录: 脚本在仓库内 → 本目录; curl|bash → clone 后的 quickstart/
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}" 2>/dev/null)" 2>/dev/null && pwd || pwd)"
 COMPOSE_DIR=""
+# INSTALL_MODE: source = 源码构建; precompiled = 预编译二进制 + 容器只跑数据库
+INSTALL_MODE=""
 resolve_compose_dir() {
+  INSTALL_MODE=""
   if [ -f "$SCRIPT_DIR/docker-compose.yml" ] && [ -d "$SCRIPT_DIR/../backend" ]; then
-    COMPOSE_DIR="$SCRIPT_DIR"
+    COMPOSE_DIR="$SCRIPT_DIR"; INSTALL_MODE="source"
   elif [ -f "$CLONE_BASE/quickstart/docker-compose.yml" ]; then
-    COMPOSE_DIR="$CLONE_BASE/quickstart"
+    COMPOSE_DIR="$CLONE_BASE/quickstart"; INSTALL_MODE="source"
+  elif [ -f "$PRECOMPILED_DIR/app.env" ] && [ -f "$PRECOMPILED_DIR/db-compose.yml" ]; then
+    COMPOSE_DIR="$PRECOMPILED_DIR"; INSTALL_MODE="precompiled"
   fi
 }
 
 compose() {
+  local files=()
+  [ -f "$COMPOSE_DIR/db-compose.yml" ] && files=(-f "$COMPOSE_DIR/db-compose.yml")
   if docker compose version >/dev/null 2>&1; then
-    (cd "$COMPOSE_DIR" && $SUDO docker compose "$@")
+    (cd "$COMPOSE_DIR" && $SUDO docker compose "${files[@]}" "$@")
   elif command -v docker-compose >/dev/null 2>&1; then
-    (cd "$COMPOSE_DIR" && $SUDO docker-compose "$@")
+    (cd "$COMPOSE_DIR" && $SUDO docker-compose "${files[@]}" "$@")
   else
     p_err "未找到 docker compose 插件"; exit 1
   fi
 }
 
-env_get() { grep -E "^$1=" "$COMPOSE_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-; }
+# 通过加速源下载: fetch_url <最终URL> <输出路径>
+fetch_url() {
+  local target="$1" out="$2" prefix url host
+  for prefix in "${GH_PROXIES[@]}"; do
+    url="${prefix}${target}"
+    host="${prefix#https://}"; host="${host%/}"
+    [ -n "$host" ] || host="github.com(直连)"
+    p_info "下载源: $host"
+    if curl -fL --connect-timeout 10 --retry 2 --retry-delay 2 \
+         --speed-time 20 --speed-limit 4096 -o "$out.part" "$url"; then
+      mv -f "$out.part" "$out"
+      return 0
+    fi
+    rm -f "$out.part"
+    p_warn "$host 失败或速度过慢，切换下一个源"
+  done
+  return 1
+}
+
+# 预编译部署凭据在 app.env，源码部署在 .env
+env_get() {
+  local f="$COMPOSE_DIR/.env"
+  [ -f "$COMPOSE_DIR/app.env" ] && f="$COMPOSE_DIR/app.env"
+  grep -E "^$1=" "$f" 2>/dev/null | head -1 | cut -d= -f2-
+}
 
 app_url() { echo "http://127.0.0.1:$(env_get SERVER_PORT || echo 8080)"; }
 
@@ -116,6 +152,11 @@ rand_hex() { openssl rand -hex "$1" 2>/dev/null || head -c "$(( $1 * 2 ))" /dev/
 # ---------- 1. 安装 ----------
 cmd_install() {
   hr; echo -e "${CYAN}  一键安装 sub2api 破甲版${NC}"; hr
+  resolve_compose_dir
+  if [ "$INSTALL_MODE" = "precompiled" ]; then
+    cmd_install_precompiled
+    return
+  fi
   ensure_docker
   ensure_repo
 
@@ -191,11 +232,37 @@ EOF
   cmd_status || true
 }
 
+# 预编译部署的“重新安装” = 重跑免编译安装器（不编译、不覆盖 app.env、不动数据卷）
+cmd_install_precompiled() {
+  p_warn "检测到预编译部署: $PRECOMPILED_DIR"
+  p_info "重装 = 下载最新发布包并覆盖二进制/人格库，app.env 与数据卷保持不变"
+  if is_tty; then
+    ask_yn "继续重新安装？" || { p_info "已取消"; return 0; }
+  fi
+  update_precompiled
+}
+
 # ---------- 2. 绑定域名 ----------
 cmd_domain() {
   hr; echo -e "${CYAN}  绑定域名（Caddy 自动 TLS）${NC}"; hr
   resolve_compose_dir
-  [ -n "$COMPOSE_DIR" ] && [ -f "$COMPOSE_DIR/.env" ] || { p_err "尚未安装，请先执行安装"; exit 1; }
+  { [ -n "$COMPOSE_DIR" ] && { [ -f "$COMPOSE_DIR/.env" ] || [ -f "$COMPOSE_DIR/app.env" ]; }; } \
+    || { p_err "尚未安装，请先执行安装"; exit 1; }
+
+  if [ "$INSTALL_MODE" = "precompiled" ]; then
+    local pport; pport="$(env_get SERVER_PORT)"; pport="${pport:-8080}"
+    p_warn "预编译部署只有 postgres/redis 容器，不含内置 Caddy，无法自动签发证书"
+    p_info "请在宿主机已有反向代理里配置，把域名转发到 http://127.0.0.1:$pport"
+    echo "  Caddyfile 片段:"
+    echo "    <你的域名> {"
+    echo "        reverse_proxy 127.0.0.1:$pport"
+    echo "    }"
+    echo "  Nginx 片段:"
+    echo "    location / { proxy_pass http://127.0.0.1:$pport; proxy_set_header Host \$host; proxy_set_header X-Forwarded-Proto \$scheme; }"
+    p_info "改完后执行: sudo systemctl reload caddy  （或 nginx -s reload）"
+    return 0
+  fi
+
   is_tty || { p_err "绑定域名需要交互终端: bash install.sh domain"; exit 1; }
 
   local domain
@@ -231,6 +298,26 @@ cmd_uninstall() {
   hr; echo -e "${CYAN}  卸载 sub2api 破甲版${NC}"; hr
   resolve_compose_dir
   [ -n "$COMPOSE_DIR" ] || { p_warn "未找到安装"; return 0; }
+
+  if [ "$INSTALL_MODE" = "precompiled" ]; then
+    is_tty && ! ask_yn "确认停止并停用 sub2api 服务？" && { p_info "已取消"; return 0; }
+    p_info "停用 systemd 服务 ..."
+    $SUDO systemctl disable --now sub2api >/dev/null 2>&1 || true
+    $SUDO rm -f /etc/systemd/system/sub2api.service
+    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+    compose down || true
+    if is_tty && ask_yn "是否同时删除数据库/Redis 数据卷（数据将丢失）？"; then
+      compose down -v || true
+      p_ok "数据卷已删除"
+    fi
+    if is_tty && ask_yn "是否删除应用目录 $PRECOMPILED_DIR（含 app.env 与人格库）？"; then
+      $SUDO rm -rf "$PRECOMPILED_DIR"
+      p_ok "应用目录已删除"
+    fi
+    p_ok "卸载完成"
+    return 0
+  fi
+
   is_tty && ! ask_yn "确认停止并移除容器？" && { p_info "已取消"; return 0; }
 
   compose --profile domain down || true
@@ -249,10 +336,22 @@ cmd_uninstall() {
 cmd_status() {
   hr; echo -e "${CYAN}  运行状态检测${NC}"; hr
   resolve_compose_dir
-  [ -n "$COMPOSE_DIR" ] && [ -f "$COMPOSE_DIR/.env" ] || { p_err "尚未安装"; exit 1; }
+  { [ -n "$COMPOSE_DIR" ] && { [ -f "$COMPOSE_DIR/.env" ] || [ -f "$COMPOSE_DIR/app.env" ]; }; } \
+    || { p_err "尚未安装"; exit 1; }
+  local env_file="$COMPOSE_DIR/.env"
+  [ -f "$COMPOSE_DIR/app.env" ] && env_file="$COMPOSE_DIR/app.env"
 
   echo ""; p_info "容器状态:"
   (cd "$COMPOSE_DIR" && $SUDO docker ps --filter name=sub2api --format '  {{.Names}}\t{{.Status}}' 2>/dev/null) || true
+
+  if [ "$INSTALL_MODE" = "precompiled" ]; then
+    echo ""; p_info "应用服务:"
+    if systemctl is-active --quiet sub2api; then
+      p_ok "systemd sub2api → $(systemctl is-active sub2api) / $(systemctl is-enabled sub2api 2>/dev/null || echo unknown)"
+    else
+      p_err "systemd sub2api → 未运行（排查: systemctl status sub2api）"
+    fi
+  fi
 
   echo ""; p_info "健康检查:"
   if curl -sf --max-time 5 "$(app_url)/health" >/dev/null 2>&1; then
@@ -264,7 +363,7 @@ cmd_status() {
   p_info "管理员登录 + 破甲状态:"
   local token; token=$(admin_login || true)
   if [ -z "$token" ]; then
-    p_err "管理员登录失败（密码被改过？见 $COMPOSE_DIR/.env）"
+    p_err "管理员登录失败（密码被改过？见 $env_file）"
   else
     accept_compliance "$token"
     local state
@@ -294,13 +393,20 @@ cmd_status() {
 # ---------- 5. 日志 ----------
 cmd_logs() {
   resolve_compose_dir; [ -n "$COMPOSE_DIR" ] || { p_err "尚未安装"; exit 1; }
-  compose logs -f --tail=200 sub2api
+  if [ "$INSTALL_MODE" = "precompiled" ]; then
+    # 预编译模式应用跑在宿主机 systemd 上，日志在 journald
+    journalctl -u sub2api -f -n 200
+  else
+    compose logs -f --tail=200 sub2api
+  fi
 }
 
 # ---------- 6. 破甲开关 ----------
 cmd_armor() {
   hr; echo -e "${CYAN}  破甲开关${NC}"; hr
-  resolve_compose_dir; [ -n "$COMPOSE_DIR" ] && [ -f "$COMPOSE_DIR/.env" ] || { p_err "尚未安装"; exit 1; }
+  resolve_compose_dir
+  { [ -n "$COMPOSE_DIR" ] && { [ -f "$COMPOSE_DIR/.env" ] || [ -f "$COMPOSE_DIR/app.env" ]; }; } \
+    || { p_err "尚未安装"; exit 1; }
   is_tty || { p_err "需要交互终端"; exit 1; }
   local token; token=$(admin_login || true)
   [ -n "$token" ] || { p_err "管理员登录失败"; exit 1; }
@@ -329,9 +435,7 @@ cmd_armor() {
 }
 
 # ---------- 7. 更新 ----------
-cmd_update() {
-  hr; echo -e "${CYAN}  更新到最新代码${NC}"; hr
-  resolve_compose_dir; [ -n "$COMPOSE_DIR" ] || { p_err "尚未安装"; exit 1; }
+update_source() {
   local repo_dir; repo_dir="$(cd "$COMPOSE_DIR/.." && pwd)"
   if [ -d "$repo_dir/.git" ]; then
     p_info "拉取最新代码 ($repo_dir) ..."
@@ -340,6 +444,57 @@ cmd_update() {
   p_info "重建镜像并重启 ..."
   compose up -d --build
   wait_healthy && p_ok "更新完成"
+}
+
+# 预编译模式更新：重新拉取免编译安装器 → 下载并校验发布包 → 换二进制/人格库 → 重启 systemd
+# 全程不编译；app.env 原样保留；数据库数据卷不动
+update_precompiled() {
+  local work="/tmp/sub2api-precompiled-update"
+  local env_file="$PRECOMPILED_DIR/app.env"
+  local env_backup="$work/app.env.backup"
+  local before="" after=""
+
+  rm -rf "$work"; mkdir -p "$work"
+
+  p_info "拉取最新免编译安装器 ..."
+  if ! fetch_url "$PRECOMPILED_SCRIPT_URL" "$work/install-precompiled.sh"; then
+    p_err "所有下载源均失败，更新中止（现有版本继续运行）"; exit 1
+  fi
+  if ! grep -q 'sub2api-armor' "$work/install-precompiled.sh" || ! bash -n "$work/install-precompiled.sh"; then
+    p_err "下载到的安装器不完整（疑似代理劫持），更新中止"; exit 1
+  fi
+
+  if [ -f "$env_file" ]; then
+    cp -a "$env_file" "$env_backup"
+    before="$(sha256sum "$env_file" | awk '{print $1}')"
+  fi
+
+  p_info "执行免编译升级（下载约 38 MB 发布包并校验 SHA256）..."
+  $SUDO bash "$work/install-precompiled.sh"
+
+  if [ -f "$env_file" ]; then
+    after="$(sha256sum "$env_file" | awk '{print $1}')"
+    if [ "$before" != "$after" ]; then
+      p_warn "升级过程改动了 app.env，已从备份还原（避免换密钥导致旧数据不可读）"
+      cp -a "$env_backup" "$env_file"
+      chmod 600 "$env_file"
+      $SUDO systemctl restart sub2api
+    fi
+  fi
+  rm -f "$env_backup"
+
+  wait_healthy && p_ok "更新完成（app.env 与数据卷未改动）"
+  cmd_status || true
+}
+
+cmd_update() {
+  hr; echo -e "${CYAN}  更新到最新版本${NC}"; hr
+  resolve_compose_dir; [ -n "$COMPOSE_DIR" ] || { p_err "尚未安装"; exit 1; }
+  if [ "$INSTALL_MODE" = "precompiled" ]; then
+    update_precompiled
+  else
+    update_source
+  fi
 }
 
 # ---------- 菜单 ----------
