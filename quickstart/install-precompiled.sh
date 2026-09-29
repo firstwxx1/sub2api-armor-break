@@ -15,7 +15,7 @@ fi
 
 TAG="v0.2.9-armor1"
 ASSET="sub2api-armor-local.tar.gz"
-SHA256="ed4002216aa84de9b61af81bccb0c2bf83f600948d9ff514ae52c30532779ae1"
+SHA256="f908943324f657c87e84a4086795fc8521b2026efc8dfa26d9a679f7ec513c8a"
 GH="https://github.com/firstwxx1/sub2api-armor-break/releases/download/${TAG}/${ASSET}"
 
 # 按实测速度排序：gh-proxy.com 最快，直连最慢
@@ -72,16 +72,10 @@ echo "[*] 解压 ..."
 rm -rf "$WORK_DIR/deploy"
 tar -xzf "$ASSET"
 
-# 旧的源码构建安装会留下 /app/data，导致二进制误判“已安装”并跳过 AUTO_SETUP
-if [ -e /app/data/config.yaml ] || [ -e /app/data/.installed ]; then
-  if [ ! -f /opt/sub2api/app.env ]; then
-    BAK="/app/data.bak.$(date +%Y%m%d%H%M%S)"
-    echo "[!] 检测到旧版源码安装残留 /app/data，且没有对应的 /opt/sub2api/app.env"
-    echo "[*] 为保证本次能重新初始化，先把残留移到 $BAK（不删除）"
-    mv /app/data "$BAK"
-  else
-    echo "[!] 已有 /opt/sub2api/app.env，保留 /app/data 不处理"
-  fi
+# 残留的 /app/data 会顶掉 /opt/sub2api/data 的配置探测，导致跳过 AUTO_SETUP
+if [ -e /app/data ]; then
+  echo "[!] 检测到 /app/data 残留，移开以免抢占配置路径"
+  mv /app/data "/app/data.bak.$(date +%Y%m%d%H%M%S)"
 fi
 
 echo "[*] 执行免编译部署 ..."
