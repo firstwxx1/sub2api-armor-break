@@ -17,6 +17,7 @@ PRECOMPILED_DIR="/opt/sub2api"
 PRECOMPILED_SCRIPT_URL="https://raw.githubusercontent.com/${REPO_SLUG}/${REPO_BRANCH}/quickstart/install-precompiled.sh"
 # 下载加速源，按实测速度排序；最后一项空串 = 直连 github.com
 GH_PROXIES=("https://gh-proxy.com/" "https://ghfast.top/" "")
+GH_API="https://api.github.com/repos/${REPO_SLUG}/contents"
 COMPLIANCE_PHRASE_ZH="我已阅读、理解并同意 Sub2API 部署与运营合规承诺"
 
 # ---------- 颜色 ----------
@@ -67,21 +68,83 @@ compose() {
   fi
 }
 
-# 通过加速源下载: fetch_url <最终URL> <输出路径>
-fetch_url() {
-  local target="$1" out="$2" prefix url host
+# 从 GitHub raw / 加速源 / jsDelivr 下载文本文件
+# - 加速源常把 raw 的旧版本缓存住，所以带 _cb 时间戳
+# - 仍返回过期内容时（例如缺少预期标记）自动换源
+url_host() { local h="${1#*://}"; echo "${h%%/*}"; }
+
+# 解析重定向，拿到真正的对象存储直链（绕过对 raw 的缓存）
+resolve_redirect_url() {
+  local url="$1"
+  curl -fsSI --connect-timeout 8 --max-time 15 "$url" 2>/dev/null \
+    | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}' | tail -1
+}
+
+download_from_url() { # <url> <out> [validator-regex]
+  local url="$1" out="$2" validator="${3:-}"
+  if ! curl -fL --connect-timeout 10 --retry 1 --retry-delay 2 \
+       --speed-time 20 --speed-limit 2048 --max-time 120 -o "$out.part" "$url"; then
+    rm -f "$out.part"; return 1
+  fi
+  if [ -n "$validator" ] && ! grep -qE "$validator" "$out.part" 2>/dev/null; then
+    p_warn "$(url_host "$url") 返回了过期/不完整内容，换源"
+    rm -f "$out.part"; return 1
+  fi
+  mv -f "$out.part" "$out"; return 0
+}
+
+# 从 GitHub Contents API 拉文件（无 CDN，永远是最新 commit）
+download_from_api() { # <repo-path> <ref> <out> [validator-regex]
+  local rpath="$1" ref="$2" out="$3" validator="${4:-}"
+  local base64_file="$out.b64"
+  if ! curl -fsSL --connect-timeout 10 --max-time 60 \
+       -H 'Accept: application/vnd.github.raw' -o "$base64_file" \
+       "${GH_API}/${rpath}?ref=${ref}"; then
+    rm -f "$base64_file"; return 1
+  fi
+  if [ -n "$validator" ] && ! grep -qE "$validator" "$base64_file" 2>/dev/null; then
+    rm -f "$base64_file"; return 1
+  fi
+  mv -f "$base64_file" "$out"; return 0
+}
+
+os_download() { # 对象存储直链优先；失效则跳回 raw
+  local out="$1" api_path="$2" ref="$3" validator="${4:-}"
+  local raw="https://raw.githubusercontent.com/${REPO_SLUG}/${ref}/${api_path}"
+  local direct="" host
   for prefix in "${GH_PROXIES[@]}"; do
-    url="${prefix}${target}"
+    direct="$(resolve_redirect_url "${prefix}${raw}")" && [ -n "$direct" ] && break
+  done
+  if [ -n "$direct" ]; then
+    host="$(url_host "$direct")"
+    p_info "下载源: $host (对象存储直链)"
+    if download_from_url "$direct" "$out" "$validator"; then return 0; fi
+  fi
+  for prefix in "${GH_PROXIES[@]}"; do
     host="${prefix#https://}"; host="${host%/}"
     [ -n "$host" ] || host="github.com(直连)"
     p_info "下载源: $host"
-    if curl -fL --connect-timeout 10 --retry 2 --retry-delay 2 \
-         --speed-time 20 --speed-limit 4096 -o "$out.part" "$url"; then
-      mv -f "$out.part" "$out"
-      return 0
-    fi
-    rm -f "$out.part"
-    p_warn "$host 失败或速度过慢，切换下一个源"
+    if download_from_url "${prefix}${raw}?_cb=$(date +%s%N)" "$out" "$validator"; then return 0; fi
+  done
+  p_info "下载源: cdn.jsdelivr.net"
+  if download_from_url "https://cdn.jsdelivr.net/gh/${REPO_SLUG}@${ref}/${api_path}" "$out" "$validator"; then return 0; fi
+  p_info "下载源: api.github.com (无 CDN)"
+  download_from_api "$api_path" "$ref" "$out" "$validator"
+}
+
+fetch_url() { # <最终URL> <输出路径> [validator-regex] —— 更新 install-precompiled.sh 用
+  local raw="$1" out="$2" validator="${3:-}"
+  local direct host prefix
+  if [[ "$raw" == "https://raw.githubusercontent.com/${REPO_SLUG}/"* ]]; then
+    local rest="${raw#https://raw.githubusercontent.com/${REPO_SLUG}/}"
+    local ref="${rest%%/*}"; local api_path="${rest#*/}"
+    os_download "$out" "$api_path" "$ref" "$validator"; return $?
+  fi
+  for prefix in "${GH_PROXIES[@]}"; do
+    host="${prefix#https://}"; host="${host%/}"
+    [ -n "$host" ] || host="github.com(直连)"
+    p_info "下载源: $host"
+    if download_from_url "${prefix}${raw}?_cb=$(date +%s%N)" "$out" "$validator"; then return 0; fi
   done
   return 1
 }
@@ -459,10 +522,10 @@ update_precompiled() {
   rm -rf "$work"; mkdir -p "$work"
 
   p_info "拉取最新免编译安装器 ..."
-  if ! fetch_url "$PRECOMPILED_SCRIPT_URL" "$work/install-precompiled.sh"; then
+  if ! fetch_url "$PRECOMPILED_SCRIPT_URL" "$work/install-precompiled.sh" 'install-precompiled|sub2api-armor'; then
     p_err "所有下载源均失败，更新中止（现有版本继续运行）"; exit 1
   fi
-  if ! grep -q 'sub2api-armor' "$work/install-precompiled.sh" || ! bash -n "$work/install-precompiled.sh"; then
+  if ! grep -q 'SHA256=' "$work/install-precompiled.sh" || ! bash -n "$work/install-precompiled.sh"; then
     p_err "下载到的安装器不完整（疑似代理劫持），更新中止"; exit 1
   fi
 
