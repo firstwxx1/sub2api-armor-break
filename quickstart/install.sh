@@ -87,10 +87,11 @@ fetch_url() {
 }
 
 # 预编译部署凭据在 app.env，源码部署在 .env
+# 两个文件都是 600 且由 root 持有，非 root 运行时要提权读
 env_get() {
   local f="$COMPOSE_DIR/.env"
   [ -f "$COMPOSE_DIR/app.env" ] && f="$COMPOSE_DIR/app.env"
-  grep -E "^$1=" "$f" 2>/dev/null | head -1 | cut -d= -f2-
+  $SUDO grep -E "^$1=" "$f" 2>/dev/null | head -1 | cut -d= -f2-
 }
 
 app_url() { echo "http://127.0.0.1:$(env_get SERVER_PORT || echo 8080)"; }
@@ -465,19 +466,19 @@ update_precompiled() {
   fi
 
   if [ -f "$env_file" ]; then
-    cp -a "$env_file" "$env_backup"
-    before="$(sha256sum "$env_file" | awk '{print $1}')"
+    $SUDO cp -a "$env_file" "$env_backup"
+    before="$($SUDO sha256sum "$env_file" | awk '{print $1}')"
   fi
 
   p_info "执行免编译升级（下载约 38 MB 发布包并校验 SHA256）..."
   $SUDO bash "$work/install-precompiled.sh"
 
   if [ -f "$env_file" ]; then
-    after="$(sha256sum "$env_file" | awk '{print $1}')"
+    after="$($SUDO sha256sum "$env_file" | awk '{print $1}')"
     if [ "$before" != "$after" ]; then
       p_warn "升级过程改动了 app.env，已从备份还原（避免换密钥导致旧数据不可读）"
-      cp -a "$env_backup" "$env_file"
-      chmod 600 "$env_file"
+      $SUDO cp -a "$env_backup" "$env_file"
+      $SUDO chmod 600 "$env_file"
       $SUDO systemctl restart sub2api
     fi
   fi
