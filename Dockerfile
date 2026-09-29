@@ -22,6 +22,9 @@ ARG NPM_CONFIG_REGISTRY=
 # it on the native host arch instead of under QEMU emulation for the target.
 FROM --platform=${BUILDPLATFORM} ${NODE_IMAGE} AS frontend-builder
 ARG NPM_CONFIG_REGISTRY
+# 小内存 VPS（≤1GB）构建保护：限制 node 堆内存，避免 vite 构建触发 OOM
+ARG NODE_OPTIONS=--max-old-space-size=768
+ENV NODE_OPTIONS=${NODE_OPTIONS}
 
 WORKDIR /app/frontend
 
