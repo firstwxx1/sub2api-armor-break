@@ -624,6 +624,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/armor-break',
+    name: 'AdminArmorBreak',
+    component: () => import('@/views/admin/ArmorBreakView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Armor Break',
+      titleKey: 'admin.armorBreak.title',
+      descriptionKey: 'admin.armorBreak.description'
+    }
+  },
+  {
     path: '/admin/usage',
     name: 'AdminUsage',
     component: () => import('@/views/admin/UsageView.vue'),

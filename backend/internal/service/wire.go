@@ -847,6 +847,11 @@ func ProvideAPIKeyService(
 	return svc
 }
 
+// ProvideArmorBreakService wires ArmorBreakService（人格目录走 env ARMOR_BREAK_PERSONA_DIR/默认 ./personas）。
+func ProvideArmorBreakService(settingRepo SettingRepository) *ArmorBreakService {
+	return NewArmorBreakService(settingRepo, "")
+}
+
 // ProviderSet is the Wire provider set for all services
 var ProviderSet = wire.NewSet(
 	// Core services
@@ -913,6 +918,7 @@ var ProviderSet = wire.NewSet(
 	ProvideBackupService,
 	ProvideOpsSystemLogSink,
 	ProvideOpsService,
+	ProvideArmorBreakService,
 	ProvideOpsIngressRejectAggregator,
 	ProvideAuditLogService,
 	ProvideOpsMetricsCollector,

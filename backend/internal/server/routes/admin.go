@@ -19,6 +19,7 @@ func RegisterAdminRoutes(
 	stepUpAuth middleware.StepUpAuthMiddleware,
 	settingService *service.SettingService,
 	panelRateLimiter *middleware.PanelRateLimiter,
+	armorBreakService *service.ArmorBreakService,
 ) {
 	// 插件 UI 使用短时能力 URL，仅提供经过安装校验的静态资源。
 	v1.GET("/plugin-ui/:token/*path", h.Admin.Plugin.ServeUIAsset)
@@ -126,11 +127,14 @@ func RegisterAdminRoutes(
 		registerPromptAuditRoutes(admin, h)
 
 		// 邀请返利（专属用户管理）
-		registerAffiliateRoutes(admin, h)
+	registerAffiliateRoutes(admin, h)
 
-		// 操作审计日志
-		registerAuditLogRoutes(admin, h, stepUpAuth)
-	}
+	// 操作审计日志
+	registerAuditLogRoutes(admin, h, stepUpAuth)
+
+	// 破甲（人格注入）管理面
+	RegisterArmorBreakAdminRoutes(admin, armorBreakService)
+}
 }
 
 func registerPromptAuditRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
