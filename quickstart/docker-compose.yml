@@ -21,8 +21,8 @@ services:
       - "${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-8080}:8080"
     volumes:
       - sub2api_data:/app/data
-      # 人格库（破甲）：仓库 personas/ 只读挂载进容器
-      - ../personas:/app/personas:ro
+      # 人格库（破甲）：读写挂载，面板上传/编辑/删除直接落盘到仓库 personas/
+      - ../personas:/app/personas:rw
     environment:
       - AUTO_SETUP=true
       - SERVER_HOST=0.0.0.0

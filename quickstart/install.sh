@@ -235,6 +235,9 @@ cmd_install() {
   ensure_docker
   ensure_repo
 
+  # 人格库目录需对容器内 uid 1000 可写，否则面板上传/编辑/删除人格报 500
+  [ -d "$COMPOSE_DIR/../personas" ] && $SUDO chown -R 1000:1000 "$COMPOSE_DIR/../personas" 2>/dev/null || true
+
   local reuse_secrets=""
   if [ -f "$COMPOSE_DIR/.env" ]; then
     p_warn "检测到已有安装（.env 存在）"
@@ -566,6 +569,8 @@ update_source() {
   if [ -d "$repo_dir/.git" ]; then
     p_info "拉取最新代码 ($repo_dir) ..."
     git -C "$repo_dir" pull --ff-only || p_warn "拉取失败（本地有改动？），仍将继续重建"
+    # 新拉取的人格文件是 root 所有，需还给容器 uid 1000 以维持面板 CRUD 可写
+    [ -d "$repo_dir/personas" ] && $SUDO chown -R 1000:1000 "$repo_dir/personas" 2>/dev/null || true
   fi
   p_info "重建镜像并重启 ..."
   compose up -d --build
