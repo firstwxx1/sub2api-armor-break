@@ -162,8 +162,19 @@ app_url() { echo "http://127.0.0.1:$(env_get SERVER_PORT || echo 8080)"; }
 wait_healthy() {
   local url; url="$(app_url)/health"
   p_info "等待服务就绪 ($url) ..."
+  local crash_hits=0 st
   for i in $(seq 1 90); do
     if curl -sf --max-time 3 "$url" >/dev/null 2>&1; then p_ok "服务已就绪"; return 0; fi
+    # 崩循环快失败：容器反复重启时立即中止并给出日志，不再空等 90 轮
+    st=$($SUDO docker ps -a --filter 'name=^/sub2api$' --format '{{.Status}}' 2>/dev/null | head -1)
+    if echo "$st" | grep -qi '^Restarting'; then crash_hits=$((crash_hits+1)); else crash_hits=0; fi
+    if [ "$crash_hits" -ge 3 ]; then
+      p_err "sub2api 容器在崩循环（反复重启），中止等待。最近日志："
+      $SUDO docker logs --tail 15 sub2api 2>&1 | sed 's/^/    /'
+      p_info "常见原因: .env 密钥与既有数据卷不匹配（postgres 密码只认首次初始化值）"
+      p_info "处置: 重装时选择沿用密钥（本脚本默认行为），或菜单 [3] 卸载并清数据卷后全新安装"
+      return 1
+    fi
     sleep 2
   done
   p_err "服务 90 次探测后仍未就绪，请用菜单 [5] 查看日志"; return 1
@@ -224,9 +235,12 @@ cmd_install() {
   ensure_docker
   ensure_repo
 
+  local reuse_secrets=""
   if [ -f "$COMPOSE_DIR/.env" ]; then
     p_warn "检测到已有安装（.env 存在）"
-    if is_tty && ask_yn "覆盖配置并重新安装？（数据卷保留）"; then :; else
+    if is_tty && ask_yn "覆盖配置并重新安装？（数据卷保留）"; then
+      reuse_secrets=1
+    else
       p_info "改为重建并重启服务..."
       compose up -d --build
       wait_healthy && cmd_status
@@ -234,13 +248,36 @@ cmd_install() {
     fi
   fi
 
+  # 重装时必须沿用与数据卷匹配的有状态密钥：
+  # postgres 数据卷只在首次初始化时读取 POSTGRES_PASSWORD，重装时重生命钥
+  # 会导致应用永远连不上库（容器崩循环，健康等待卡死）。
+  local old_email="" old_pass="" pg_user="" pg_pass="" pg_db="" redis_pass="" jwt_secret="" totp_key=""
+  if [ -n "$reuse_secrets" ]; then
+    old_email="$(env_get ADMIN_EMAIL)";  old_pass="$(env_get ADMIN_PASSWORD)"
+    pg_user="$(env_get POSTGRES_USER)";  pg_pass="$(env_get POSTGRES_PASSWORD)"
+    pg_db="$(env_get POSTGRES_DB)";      redis_pass="$(env_get REDIS_PASSWORD)"
+    jwt_secret="$(env_get JWT_SECRET)";  totp_key="$(env_get TOTP_ENCRYPTION_KEY)"
+    cp "$COMPOSE_DIR/.env" "$COMPOSE_DIR/.env.bak.$(date +%Y%m%d%H%M%S)"
+    p_info "旧 .env 已备份；数据库/Redis/会话密钥沿用旧值（与现有数据卷匹配）"
+  fi
+
   echo ""
   p_info "基础配置（直接回车用括号内默认值）"
-  local port email password persona enable_armor
-  port=$(ask "服务端口 [8080]: " "8080"); port=${port:-8080}
-  email=$(ask "管理员邮箱 [admin@sub2api.local]: " "admin@sub2api.local"); email=${email:-admin@sub2api.local}
-  password=$(ask "管理员密码 [留空自动生成]: " "")
-  if [ -z "$password" ]; then password=$(openssl rand -hex 12 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 24); fi
+  local port email password persona enable_armor new_admin_pass_set=""
+  local def_port=8080 def_email="admin@sub2api.local" def_pass_hint="留空自动生成"
+  if [ -n "$reuse_secrets" ]; then
+    def_port="$(env_get SERVER_PORT)"; def_port=${def_port:-8080}
+    def_email="$old_email"; def_email=${def_email:-admin@sub2api.local}
+    def_pass_hint="留空沿用原密码"
+  fi
+  port=$(ask "服务端口 [$def_port]: " "$def_port"); port=${port:-$def_port}
+  email=$(ask "管理员邮箱 [$def_email]: " "$def_email"); email=${email:-$def_email}
+  password=$(ask "管理员密码 [$def_pass_hint]: " "")
+  if [ -z "$password" ]; then
+    if [ -n "$reuse_secrets" ] && [ -n "$old_pass" ]; then password="$old_pass"; else password=$(rand_hex 12); fi
+  else
+    new_admin_pass_set=1
+  fi
   echo ""
   enable_armor="n"; persona="R.txt"
   if is_tty && ask_yn "安装完成后立即启用破甲？"; then
@@ -248,18 +285,21 @@ cmd_install() {
     persona=$(ask "默认人格文件名 [R.txt]: " "R.txt"); persona=${persona:-R.txt}
   fi
 
+  pg_user=${pg_user:-sub2api}; pg_pass=${pg_pass:-$(rand_hex 16)}; pg_db=${pg_db:-sub2api}
+  redis_pass=${redis_pass:-$(rand_hex 16)}; jwt_secret=${jwt_secret:-$(rand_hex 32)}; totp_key=${totp_key:-$(rand_hex 32)}
+
   p_info "生成密钥与 .env ..."
   cat > "$COMPOSE_DIR/.env" <<EOF
 SERVER_PORT=$port
 BIND_HOST=0.0.0.0
 ADMIN_EMAIL=$email
 ADMIN_PASSWORD=$password
-POSTGRES_USER=sub2api
-POSTGRES_PASSWORD=$(rand_hex 16)
-POSTGRES_DB=sub2api
-REDIS_PASSWORD=$(rand_hex 16)
-JWT_SECRET=$(rand_hex 32)
-TOTP_ENCRYPTION_KEY=$(rand_hex 32)
+POSTGRES_USER=$pg_user
+POSTGRES_PASSWORD=$pg_pass
+POSTGRES_DB=$pg_db
+REDIS_PASSWORD=$redis_pass
+JWT_SECRET=$jwt_secret
+TOTP_ENCRYPTION_KEY=$totp_key
 TZ=Asia/Shanghai
 EOF
   chmod 600 "$COMPOSE_DIR/.env"
@@ -291,6 +331,10 @@ EOF
   echo -e "  凭据备份:   $COMPOSE_DIR/.env (权限 600)"
   echo ""
   p_warn "首次登录管理员 API 的合规确认已自动完成"
+  if [ -n "$reuse_secrets" ] && [ -n "$new_admin_pass_set" ]; then
+    p_warn "管理员账号已存在于数据库：面板登录仍用原密码；新密码仅对全新数据卷生效"
+    p_info "要彻底重置（含管理员密码），请先走菜单 [3] 卸载并清理数据卷"
+  fi
   p_info "下一步: 面板里添加上游账号 → 创建 API key → 即可使用"
   p_info "绑定域名走菜单第 2 项; 状态检测走第 4 项"
   cmd_status || true
@@ -328,6 +372,23 @@ cmd_domain() {
   fi
 
   is_tty || { p_err "绑定域名需要交互终端: bash install.sh domain"; exit 1; }
+
+  # 80/443 预检：被占用（如宿主机已有 nginx 反代其他站点）时 Caddy 必然起不来，
+  # 提前报错并给出替代方案，避免写了 Caddyfile 才在起容器时失败
+  local busy_ports; busy_ports=$($SUDO ss -tlnp 2>/dev/null | grep -E ':(80|443)\s' || true)
+  if [ -n "$busy_ports" ]; then
+    local bport; bport="$(env_get SERVER_PORT)"; bport="${bport:-8080}"
+    p_err "本机 80/443 已被占用，内置 Caddy 无法绑定端口："
+    echo "$busy_ports" | sed 's/^/    /'
+    p_info "建议改用现有反代把域名转发到 http://127.0.0.1:$bport ："
+    echo "  Nginx 片段:"
+    echo "    server { listen 80; server_name <你的域名>; client_max_body_size 50m;"
+    echo "      location / { proxy_pass http://127.0.0.1:$bport; proxy_set_header Host \$host;"
+    echo "        proxy_set_header X-Forwarded-Proto \$scheme; proxy_buffering off; proxy_read_timeout 600s; } }"
+    echo "  然后签发证书: certbot --nginx -d <你的域名>"
+    p_info "或先停用占用 80/443 的服务后重试本菜单"
+    return 1
+  fi
 
   local domain
   domain=$(ask "请输入域名（需已解析到本机 IP）: " "")

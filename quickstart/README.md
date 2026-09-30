@@ -83,4 +83,5 @@ sudo bash install.sh install  # 或直接执行某项
 - 大陆 IP + 无备案域名：80 端口 HTTP 会被运营商/云厂商劫持，请始终使用 `https://` 入口
 - `raw.githubusercontent.com` 从大陆服务器常超时；上面所有 URL 都套了 `gh-proxy.com` 加速前缀
 - postgres 数据卷挂载点已按 postgres:18 的新布局处理（`PGDATA=/var/lib/postgresql/data`），down/up 不会丢数据
+- 重复安装会自动沿用既有 `.env` 中的数据库/Redis/会话密钥（postgres 数据卷只认首次初始化时的密码，重生命钥会导致应用崩循环）；要彻底重置请先用菜单 3 卸载并清数据卷
 - 人格库：源码模式来自仓库 `personas/`；预编译模式解包到 `/opt/sub2api/personas`，更新时随发布包刷新
